@@ -207,6 +207,10 @@ marimo/_lsp/
 __marimo__/
 
 
+# Node / React
+node_modules/
+.env.local
+
 # markdown
 PROJECT_DESCRIPTION.md
 BUILD_PLAN.md
