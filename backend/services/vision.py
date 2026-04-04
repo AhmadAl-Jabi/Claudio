@@ -49,11 +49,44 @@ def _time_ago(timestamp_str: str) -> str:
         return f"about {days} day{'s' if days != 1 else ''} ago"
 
 
+def _classify_intent(question: str) -> str:
+    """Returns 'VISUAL' if the question is about locating something, 'CHAT' otherwise."""
+    client = get_anthropic_client()
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=5,
+        messages=[{
+            "role": "user",
+            "content": f'The user said: "{question}"\n\n did the user mention they can\'t find something, ask where something is, or needs help locating an item? If yes, reply with "VISUAL". If no, reply with "CHAT".'
+        }],
+    )
+    result = response.content[0].text.strip().upper()
+    return "VISUAL" if result.startswith("VISUAL") else "CHAT"
+
+
 async def ask_claude_about_frames(question: str, frames: list[dict]) -> dict:
     """
     Send the top matching frames + user question to Claude Vision.
     Returns the answer text and best matching frame.
     """
+    intent = _classify_intent(question)
+
+    if intent == "CHAT":
+        client = get_anthropic_client()
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=150,
+            messages=[{
+                "role": "user",
+                "content": f'You are Claudio, a friendly memory assistant for a user with dementia. The user said: "{question}"\n\nRespond naturally and briefly. Only use plain ASCII characters.'
+            }],
+        )
+        return {
+            "answer": response.content[0].text.strip(),
+            "best_frame": None,
+            "all_frames": [],
+        }
+
     if not frames:
         return {
             "answer": "I haven't seen that recently.",

@@ -11,13 +11,6 @@ export default function MessageBubble({ message }) {
         {bestFrame && bestFrame.image_url && (
           <FrameThumbnail frame={bestFrame} />
         )}
-        {allFrames && allFrames.length > 1 && (
-          <div className="frame-carousel">
-            {allFrames.map((frame, i) => (
-              <FrameThumbnail key={i} frame={frame} small />
-            ))}
-          </div>
-        )}
       </div>
     </div>
   )
