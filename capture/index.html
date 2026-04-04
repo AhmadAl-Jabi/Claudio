@@ -137,7 +137,8 @@
     const frameCountEl = document.getElementById('frameCount');
 
     let capturing = false;
-    let intervalId = null;
+    let clipIntervalId = null;
+    let feedIntervalId = null;
     let frameCount = 0;
     let sending = false;
 
@@ -151,8 +152,31 @@
       });
       video.srcObject = stream;
       await video.play();
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      // If portrait, rotate to landscape
+      if (h > w) {
+        canvas.width = h;
+        canvas.height = w;
+      } else {
+        canvas.width = w;
+        canvas.height = h;
+      }
+    }
+
+    function drawRotated() {
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (h > w) {
+        // Portrait → rotate 90° to landscape
+        ctx.save();
+        ctx.translate(canvas.width / 2, canvas.height / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.drawImage(video, -w / 2, -h / 2, w, h);
+        ctx.restore();
+      } else {
+        ctx.drawImage(video, 0, 0, w, h);
+      }
     }
 
     function setStatus(state, text) {
@@ -168,7 +192,7 @@
       const serverUrl = serverUrlInput.value.replace(/\/+$/, '') || window.location.origin;
 
       // Draw current video frame to canvas
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      drawRotated();
 
       // Convert to JPEG blob at 0.6 quality
       const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.6));
@@ -210,21 +234,72 @@
       sending = false;
     }
 
+    let feedSocket = null;
+    let feedReady = false;
+    let feedBusy = false;
+
+    function getWsUrl() {
+      const serverUrl = serverUrlInput.value.replace(/\/+$/, '') || window.location.origin;
+      return serverUrl.replace(/^http/, 'ws') + '/ws/feed';
+    }
+
+    function sendDisplayFrame() {
+      if (!feedReady || feedBusy) return;
+      feedBusy = true;
+      drawRotated();
+      canvas.toBlob(blob => {
+        if (blob && feedReady) {
+          try { feedSocket.send(blob); } catch {}
+        }
+        feedBusy = false;
+      }, 'image/jpeg', 0.3);
+    }
+
+    function connectFeedSocket() {
+      const url = getWsUrl();
+      console.log('Connecting feed WebSocket to:', url);
+      feedSocket = new WebSocket(url);
+      feedSocket.binaryType = 'arraybuffer';
+      feedSocket.onopen = () => {
+        console.log('Feed WebSocket connected');
+        feedReady = true;
+        feedIntervalId = setInterval(sendDisplayFrame, 100);
+      };
+      feedSocket.onerror = (e) => {
+        console.error('Feed WebSocket error:', e);
+      };
+      feedSocket.onclose = () => {
+        console.log('Feed WebSocket closed');
+        feedReady = false;
+        clearInterval(feedIntervalId);
+        // Reconnect if still capturing
+        if (capturing) setTimeout(connectFeedSocket, 1000);
+      };
+    }
+
     function startCapture() {
       localStorage.setItem('claudio_server', serverUrlInput.value);
       capturing = true;
       toggleBtn.textContent = 'Stop Capture';
       toggleBtn.className = 'stop';
       setStatus('ok', 'Running');
-      // Send immediately, then every 2 seconds
+
+      // WebSocket for smooth live feed (~60fps)
+      connectFeedSocket();
+
+      // CLIP embedding every 2 seconds
       captureAndSend();
-      intervalId = setInterval(captureAndSend, 2000);
+      clipIntervalId = setInterval(captureAndSend, 2000);
     }
 
     function stopCapture() {
       capturing = false;
-      clearInterval(intervalId);
-      intervalId = null;
+      clearInterval(clipIntervalId);
+      clearInterval(feedIntervalId);
+      clipIntervalId = null;
+      feedIntervalId = null;
+      feedReady = false;
+      if (feedSocket) { feedSocket.close(); feedSocket = null; }
       toggleBtn.textContent = 'Start Capture';
       toggleBtn.className = 'start';
       setStatus('idle', 'Stopped');

@@ -1,4 +1,5 @@
 import os
+import asyncio
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -7,10 +8,9 @@ load_dotenv()
 
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from services.clip import embed_image, cosine_similarity
@@ -25,11 +25,14 @@ logging.basicConfig(level=logging.INFO)
 _last_embedding: list[float] | None = None
 DEDUP_THRESHOLD = 0.95
 
+# Shared frame buffer for live feed
+_latest_display_frame: bytes | None = None
+_frame_version = 0
+_frame_condition = asyncio.Condition()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # CLIP model loads at import time (services/clip.py module level).
-    # This lifespan just confirms startup is complete.
     print("Claudio backend ready — CLIP model loaded.")
     yield
 
@@ -56,15 +59,17 @@ def health():
 
 @app.post("/api/frames", status_code=201)
 async def ingest_frame(file: UploadFile = File(...)):
-    """
-    Receive a JPEG frame from the capture app.
-    Embed with CLIP, deduplicate, store in Supabase.
-    """
-    global _last_embedding
+    global _last_embedding, _latest_display_frame, _frame_version
 
     image_bytes = await file.read()
     if not image_bytes:
         raise HTTPException(status_code=400, detail="Empty file")
+
+    # Also push to live feed
+    _latest_display_frame = image_bytes
+    async with _frame_condition:
+        _frame_version += 1
+        _frame_condition.notify_all()
 
     # Embed the frame with CLIP
     embedding = embed_image(image_bytes)
@@ -86,11 +91,35 @@ async def ingest_frame(file: UploadFile = File(...)):
     return {"status": "stored", "frame_id": record["id"], "image_url": image_url}
 
 
+# --- Display-only frame (no CLIP, just update live feed) ---
+
+@app.post("/api/frames/display", status_code=204)
+async def display_frame(file: UploadFile = File(...)):
+    global _latest_display_frame, _frame_version
+    image_bytes = await file.read()
+    if not image_bytes:
+        return
+    _latest_display_frame = image_bytes
+    async with _frame_condition:
+        _frame_version += 1
+        _frame_condition.notify_all()
+
+
+# --- Live frame (raw JPEG, polled by frontend) ---
+
+@app.get("/api/frames/live")
+def live_frame():
+    """Return the latest display frame as raw JPEG bytes."""
+    if _latest_display_frame is None:
+        raise HTTPException(status_code=404, detail="No frames yet")
+    return Response(content=_latest_display_frame, media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
+
+
 # --- Latest Frame (for live feed polling) ---
 
 @app.get("/api/frames/latest")
 def latest_frame():
-    """Return the most recent frame for the live feed display."""
     frame = get_latest_frame()
     if not frame:
         raise HTTPException(status_code=404, detail="No frames captured yet")
@@ -106,7 +135,6 @@ class SearchRequest(BaseModel):
 
 @app.post("/api/search")
 def search(req: SearchRequest):
-    """Semantic search over stored frames using CLIP text embedding."""
     results = search_frames(req.query, match_count=req.match_count)
     return {"results": results}
 
@@ -119,19 +147,8 @@ class AskRequest(BaseModel):
 
 @app.post("/api/ask")
 async def ask(req: AskRequest):
-    """
-    The core Claudio interaction:
-    1. CLIP-embed the question text
-    2. pgvector search for top matching frames
-    3. Send frames + question to Claude Vision
-    4. Return natural language answer + best frame
-    """
-    # Search for relevant frames
     frames = search_frames(req.question, match_count=5)
-
-    # Ask Claude to analyze the frames and answer
     result = await ask_claude_about_frames(req.question, frames)
-
     return result
 
 
@@ -139,44 +156,55 @@ async def ask(req: AskRequest):
 
 @app.get("/api/debug")
 def debug():
-    """
-    Returns diagnostic info about what is stored in Supabase:
-    - total frame count
-    - how many frames have a non-NULL embedding
-    - the 3 most recent frames (id, timestamp, image_url, embedding preview)
-    Useful for verifying that the capture pipeline is working end-to-end.
-    """
     from services.storage import get_client
     client = get_client()
-
     result = client.table("frames").select("id, timestamp, image_url, embedding").order("timestamp", desc=True).execute()
     frames = result.data or []
-
     total = len(frames)
     with_embedding = sum(1 for f in frames if f.get("embedding") is not None)
-
     previews = []
     for f in frames[:3]:
         emb = f.get("embedding")
         if emb is not None:
-            if isinstance(emb, str):
-                emb_preview = emb[:60] + "..."
-            else:
-                emb_preview = str(emb[:4]) + f"... ({len(emb)} dims)"
+            emb_preview = emb[:60] + "..." if isinstance(emb, str) else str(emb[:4]) + f"... ({len(emb)} dims)"
         else:
             emb_preview = None
-        previews.append({
-            "id": f["id"],
-            "timestamp": f["timestamp"],
-            "image_url": f["image_url"],
-            "embedding_preview": emb_preview,
-        })
+        previews.append({"id": f["id"], "timestamp": f["timestamp"], "image_url": f["image_url"], "embedding_preview": emb_preview})
+    return {"total_frames": total, "frames_with_embedding": with_embedding, "recent_frames": previews}
 
-    return {
-        "total_frames": total,
-        "frames_with_embedding": with_embedding,
-        "recent_frames": previews,
-    }
+
+# --- Live Feed WebSocket ---
+
+@app.websocket("/ws/feed")
+async def feed_source(ws: WebSocket):
+    """Phone connects here and sends JPEG frames as binary for live display."""
+    global _latest_display_frame, _frame_version
+    await ws.accept()
+    try:
+        while True:
+            data = await ws.receive_bytes()
+            _latest_display_frame = data
+            async with _frame_condition:
+                _frame_version += 1
+                _frame_condition.notify_all()
+    except WebSocketDisconnect:
+        pass
+
+
+@app.websocket("/ws/view")
+async def feed_viewer(ws: WebSocket):
+    """Frontend connects here to receive live JPEG frames. Always sends latest, drops stale."""
+    await ws.accept()
+    last_sent = None
+    try:
+        while True:
+            frame = _latest_display_frame
+            if frame is not None and frame is not last_sent:
+                await ws.send_bytes(frame)
+                last_sent = frame
+            await asyncio.sleep(0.016)
+    except (WebSocketDisconnect, Exception):
+        pass
 
 
 # --- Serve capture page ---
@@ -192,4 +220,4 @@ def serve_capture():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
