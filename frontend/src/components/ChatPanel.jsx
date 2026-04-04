@@ -2,12 +2,24 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import MessageBubble from './MessageBubble'
 import ChatInput from './ChatInput'
 
-async function playTTS(text) {
-  const canStream =
-    typeof MediaSource !== 'undefined' &&
-    typeof MediaSource.isTypeSupported === 'function' &&
-    MediaSource.isTypeSupported('audio/mpeg')
+// Single persistent audio element — must be unlocked during a user gesture
+// before Chrome will allow programmatic playback from WebSocket events.
+const _audioEl = new Audio()
+let _audioUnlocked = false
 
+function _unlockAudio() {
+  if (_audioUnlocked) return
+  _audioUnlocked = true
+  // Play a silent 0-length wav to satisfy Chrome's autoplay requirement
+  _audioEl.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
+  _audioEl.play().catch(() => {})
+}
+
+// Unlock on the earliest possible user interaction with the page
+document.addEventListener('pointerdown', _unlockAudio, { once: true })
+document.addEventListener('keydown', _unlockAudio, { once: true })
+
+async function playTTS(text) {
   try {
     const res = await fetch('/api/tts', {
       method: 'POST',
@@ -16,39 +28,13 @@ async function playTTS(text) {
     })
     if (!res.ok) return
 
-    if (canStream && res.body) {
-      const mediaSource = new MediaSource()
-      const audio = new Audio()
-      const objectUrl = URL.createObjectURL(mediaSource)
-      audio.src = objectUrl
-      await new Promise(r => mediaSource.addEventListener('sourceopen', r, { once: true }))
-      URL.revokeObjectURL(objectUrl)
-      const sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg')
-      const reader = res.body.getReader()
-      let playing = false
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) {
-          if (sourceBuffer.updating)
-            await new Promise(r => sourceBuffer.addEventListener('updateend', r, { once: true }))
-          mediaSource.endOfStream()
-          break
-        }
-        if (sourceBuffer.updating)
-          await new Promise(r => sourceBuffer.addEventListener('updateend', r, { once: true }))
-        sourceBuffer.appendBuffer(value)
-        if (!playing) {
-          playing = true
-          audio.play().catch(() => {})
-        }
-      }
-    } else {
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      const audio = new Audio(url)
-      audio.onended = () => URL.revokeObjectURL(url)
-      audio.play().catch(() => {})
-    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    _audioEl.onended = () => URL.revokeObjectURL(url)
+    _audioEl.onerror = () => URL.revokeObjectURL(url)
+    _audioEl.src = url
+    _audioEl.load()
+    _audioEl.play().catch(() => {})
   } catch {}
 }
 
