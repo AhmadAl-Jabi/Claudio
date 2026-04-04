@@ -18,6 +18,9 @@ from services.storage import upload_frame, store_frame_record, get_latest_frame
 from services.search import search_frames
 from services.vision import ask_claude_about_frames
 
+import logging
+logging.basicConfig(level=logging.INFO)
+
 # Track the last stored embedding for deduplication
 _last_embedding: list[float] | None = None
 DEDUP_THRESHOLD = 0.95
@@ -73,10 +76,10 @@ async def ingest_frame(file: UploadFile = File(...)):
             return {"status": "skipped", "reason": "duplicate", "similarity": sim}
 
     # Upload image to Supabase Storage
-    image_url = upload_frame(image_bytes)
+    image_url, timestamp = upload_frame(image_bytes)
 
     # Store frame record with embedding in pgvector
-    record = store_frame_record(image_url, embedding)
+    record = store_frame_record(image_url, embedding, timestamp)
 
     _last_embedding = embedding
 
@@ -130,6 +133,50 @@ async def ask(req: AskRequest):
     result = await ask_claude_about_frames(req.question, frames)
 
     return result
+
+
+# --- Debug: inspect database state ---
+
+@app.get("/api/debug")
+def debug():
+    """
+    Returns diagnostic info about what is stored in Supabase:
+    - total frame count
+    - how many frames have a non-NULL embedding
+    - the 3 most recent frames (id, timestamp, image_url, embedding preview)
+    Useful for verifying that the capture pipeline is working end-to-end.
+    """
+    from services.storage import get_client
+    client = get_client()
+
+    result = client.table("frames").select("id, timestamp, image_url, embedding").order("timestamp", desc=True).execute()
+    frames = result.data or []
+
+    total = len(frames)
+    with_embedding = sum(1 for f in frames if f.get("embedding") is not None)
+
+    previews = []
+    for f in frames[:3]:
+        emb = f.get("embedding")
+        if emb is not None:
+            if isinstance(emb, str):
+                emb_preview = emb[:60] + "..."
+            else:
+                emb_preview = str(emb[:4]) + f"... ({len(emb)} dims)"
+        else:
+            emb_preview = None
+        previews.append({
+            "id": f["id"],
+            "timestamp": f["timestamp"],
+            "image_url": f["image_url"],
+            "embedding_preview": emb_preview,
+        })
+
+    return {
+        "total_frames": total,
+        "frames_with_embedding": with_embedding,
+        "recent_frames": previews,
+    }
 
 
 # --- Serve capture page ---

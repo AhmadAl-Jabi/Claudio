@@ -16,6 +16,19 @@ def get_anthropic_client() -> anthropic.Anthropic:
     return _anthropic_client
 
 
+def _detect_media_type(data: bytes) -> str:
+    """Detect image media type from magic bytes."""
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "image/jpeg"
+
+
 def _time_ago(timestamp_str: str) -> str:
     """Convert an ISO timestamp to a human-readable 'X minutes ago' string."""
     ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
@@ -50,32 +63,47 @@ async def ask_claude_about_frames(question: str, frames: list[dict]) -> dict:
 
     # Build the content array: images interleaved with timestamps
     content = []
-    for i, frame in enumerate(frames):
-        # Fetch the image and base64 encode it
-        async with httpx.AsyncClient() as http:
+    loaded = 0
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        for i, frame in enumerate(frames):
             resp = await http.get(frame["image_url"])
+            if resp.status_code != 200:
+                # Storage URL returned an error (e.g. bucket not public); skip this frame.
+                continue
             image_b64 = base64.b64encode(resp.content).decode("utf-8")
+            content_type = _detect_media_type(resp.content)
+            ts = frame.get("timestamp") or ""
+            time_ago = _time_ago(ts) if ts else "unknown time"
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": content_type,
+                    "data": image_b64,
+                },
+            })
+            content.append({
+                "type": "text",
+                "text": f"[Image {i + 1}, captured {time_ago}{(' at ' + ts) if ts else ''}]",
+            })
+            loaded += 1
 
-        content.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/jpeg",
-                "data": image_b64,
-            },
-        })
-        time_ago = _time_ago(frame["timestamp"])
-        content.append({
-            "type": "text",
-            "text": f"[Image {i + 1}, captured {time_ago} at {frame['timestamp']}]",
-        })
+    if loaded == 0:
+        return {
+            "answer": (
+                "I found relevant moments in memory but couldn't load the images "
+                "(check that the 'frame-images' Supabase Storage bucket is set to public)."
+            ),
+            "best_frame": None,
+            "all_frames": [],
+        }
 
     content.append({
         "type": "text",
         "text": f"""You are Claudio, a visual memory assistant for someone with memory difficulties.
 The user is asking: "{question}"
 
-Above are the {len(frames)} most relevant frames from the user's recent environment, with timestamps.
+Above are the {loaded} most relevant frames from the user's recent environment, with timestamps.
 
 Instructions:
 - Examine each image carefully
@@ -113,13 +141,13 @@ Instructions:
     return {
         "answer": answer_text,
         "best_frame": {
-            "image_url": frames[best_match_idx]["image_url"],
-            "timestamp": frames[best_match_idx]["timestamp"],
+            "image_url": frames[best_match_idx].get("image_url"),
+            "timestamp": frames[best_match_idx].get("timestamp", ""),
         },
         "all_frames": [
             {
-                "image_url": f["image_url"],
-                "timestamp": f["timestamp"],
+                "image_url": f.get("image_url"),
+                "timestamp": f.get("timestamp", ""),
                 "similarity": f.get("similarity", 0),
             }
             for f in frames
