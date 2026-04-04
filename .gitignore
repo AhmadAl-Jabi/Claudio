@@ -207,15 +207,10 @@ marimo/_lsp/
 __marimo__/
 
 
-<<<<<<< HEAD
-# Node / React
-node_modules/
-=======
 # Node / Frontend
 node_modules/
 dist/
 build/
->>>>>>> a6f03b6 (Implement backend)
 .env.local
 
 # markdown

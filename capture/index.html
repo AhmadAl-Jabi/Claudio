@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Claudio - Capture</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #000;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #video {
+      width: 100%;
+      flex: 1;
+      object-fit: cover;
+    }
+
+    canvas { display: none; }
+
+    .controls {
+      padding: 12px 16px;
+      background: #111;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .server-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .server-row label {
+      font-size: 13px;
+      white-space: nowrap;
+      color: #aaa;
+    }
+
+    .server-row input {
+      flex: 1;
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid #333;
+      background: #1a1a1a;
+      color: #fff;
+      font-size: 14px;
+      font-family: monospace;
+    }
+
+    .action-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    #toggleBtn {
+      padding: 10px 24px;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    #toggleBtn.start {
+      background: #22c55e;
+      color: #000;
+    }
+
+    #toggleBtn.stop {
+      background: #ef4444;
+      color: #fff;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: #aaa;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #555;
+      flex-shrink: 0;
+    }
+
+    .dot.idle { background: #555; }
+    .dot.sending { background: #facc15; }
+    .dot.ok { background: #22c55e; }
+    .dot.error { background: #ef4444; }
+  </style>
+</head>
+<body>
+
+  <div class="controls">
+    <div class="server-row">
+      <label for="serverUrl">Server:</label>
+      <input id="serverUrl" type="text" placeholder="http://192.168.1.x:8000">
+    </div>
+    <div class="action-row">
+      <button id="toggleBtn" class="start">Start Capture</button>
+      <div class="status">
+        <span class="dot" id="dot"></span>
+        <span id="statusText">Idle</span>
+        <span>&mdash;</span>
+        <span id="frameCount">0</span>
+        <span>frames sent</span>
+      </div>
+    </div>
+  </div>
+
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const toggleBtn = document.getElementById('toggleBtn');
+    const serverUrlInput = document.getElementById('serverUrl');
+    const dot = document.getElementById('dot');
+    const statusText = document.getElementById('statusText');
+    const frameCountEl = document.getElementById('frameCount');
+
+    let capturing = false;
+    let intervalId = null;
+    let frameCount = 0;
+    let sending = false;
+
+    // Restore last-used server URL
+    const saved = localStorage.getItem('claudio_server');
+    if (saved) serverUrlInput.value = saved;
+
+    async function initCamera() {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+      });
+      video.srcObject = stream;
+      await video.play();
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+    }
+
+    function setStatus(state, text) {
+      dot.className = 'dot ' + state;
+      statusText.textContent = text;
+    }
+
+    async function captureAndSend() {
+      if (sending) return; // skip if previous frame still in-flight
+      sending = true;
+
+      // Default to same origin if no URL entered (works when served from backend)
+      const serverUrl = serverUrlInput.value.replace(/\/+$/, '') || window.location.origin;
+
+      // Draw current video frame to canvas
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // Convert to JPEG blob at 0.6 quality
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.6));
+      if (!blob) {
+        setStatus('error', 'Blob failed');
+        sending = false;
+        return;
+      }
+
+      setStatus('sending', 'Sending...');
+
+      const formData = new FormData();
+      formData.append('file', blob, `frame_${Date.now()}.jpg`);
+
+      try {
+        const res = await fetch(`${serverUrl}/api/frames`, {
+          method: 'POST',
+          body: formData
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          if (data.status === 'stored') {
+            frameCount++;
+            frameCountEl.textContent = frameCount;
+            setStatus('ok', 'Stored');
+          } else if (data.status === 'skipped') {
+            setStatus('ok', 'Skipped (dup)');
+          } else {
+            setStatus('ok', `OK`);
+          }
+        } else {
+          setStatus('error', `HTTP ${res.status}`);
+        }
+      } catch (err) {
+        setStatus('error', 'Connection failed');
+      }
+
+      sending = false;
+    }
+
+    function startCapture() {
+      localStorage.setItem('claudio_server', serverUrlInput.value);
+      capturing = true;
+      toggleBtn.textContent = 'Stop Capture';
+      toggleBtn.className = 'stop';
+      setStatus('ok', 'Running');
+      // Send immediately, then every 2 seconds
+      captureAndSend();
+      intervalId = setInterval(captureAndSend, 2000);
+    }
+
+    function stopCapture() {
+      capturing = false;
+      clearInterval(intervalId);
+      intervalId = null;
+      toggleBtn.textContent = 'Start Capture';
+      toggleBtn.className = 'start';
+      setStatus('idle', 'Stopped');
+    }
+
+    toggleBtn.addEventListener('click', () => {
+      if (capturing) stopCapture();
+      else startCapture();
+    });
+
+    // Init camera on load
+    initCamera().catch(err => {
+      setStatus('error', 'Camera denied');
+      console.error('Camera error:', err);
+    });
+  </script>
+
+</body>
+</html>

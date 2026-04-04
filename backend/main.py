@@ -5,8 +5,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from pathlib import Path
+
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from services.clip import embed_image, cosine_similarity
@@ -126,6 +130,16 @@ async def ask(req: AskRequest):
     result = await ask_claude_about_frames(req.question, frames)
 
     return result
+
+
+# --- Serve capture page ---
+
+CAPTURE_DIR = Path(__file__).resolve().parent.parent / "capture"
+
+
+@app.get("/capture")
+def serve_capture():
+    return FileResponse(CAPTURE_DIR / "index.html")
 
 
 if __name__ == "__main__":
