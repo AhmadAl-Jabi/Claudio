@@ -359,8 +359,13 @@
 
     function startWakeWord() {
       if (!SpeechRecognition || !voiceEnabled) return;
-      // Abort any stale recognizer before creating a new one
-      if (wakeRecognizer) { try { wakeRecognizer.abort(); } catch {} wakeRecognizer = null; }
+      // Null out handlers BEFORE aborting so the onend doesn't re-schedule a restart
+      if (wakeRecognizer) {
+        wakeRecognizer.onend   = null;
+        wakeRecognizer.onerror = null;
+        try { wakeRecognizer.abort(); } catch {}
+        wakeRecognizer = null;
+      }
       setVoicePhase('listening', 'Say "Hey Claudio"...', '');
 
       wakeRecognizer = new SpeechRecognition();
@@ -460,16 +465,36 @@
       }
     }
 
+    function pickMaleVoice() {
+      const voices = window.speechSynthesis.getVoices();
+      // Priority list of known modern male English voices (iOS + Chrome)
+      const preferred = ['Aaron', 'Arthur', 'Daniel', 'Google UK English Male', 'Tom', 'Nathan', 'Microsoft Guy'];
+      for (const name of preferred) {
+        const v = voices.find(v => v.name.includes(name) && v.lang.startsWith('en'));
+        if (v) return v;
+      }
+      // Fallback: any English voice that doesn't have a common female name
+      return voices.find(v =>
+        v.lang.startsWith('en') &&
+        !v.name.match(/samantha|victoria|karen|moira|fiona|veena|zira|susan|hazel|kate|serena|siri/i)
+      ) || null;
+    }
+
     function speakAnswer(text) {
       setVoicePhase('speaking', 'Speaking...', text);
       window.speechSynthesis.cancel();
-      const utt   = new SpeechSynthesisUtterance(text);
-      utt.lang    = 'en-US';
-      utt.rate    = 1.0;
-      utt.pitch   = 1.0;
-      // Fallback: if onend never fires (iOS bug), return after estimated duration
+      const utt = new SpeechSynthesisUtterance(text);
+      utt.lang  = 'en-US';
+      utt.rate  = 1.05;
+      utt.pitch = 1.0;
+      const voice = pickMaleVoice();
+      if (voice) utt.voice = voice;
+      // Guard: onend, onerror, and fallback timer can all fire — only act once
       let fallbackTimer = null;
+      let finished = false;
       function done() {
+        if (finished) return;
+        finished = true;
         clearTimeout(fallbackTimer);
         // Delay before re-activating mic so iOS fully releases the audio session
         if (voiceEnabled) setTimeout(startWakeWord, 700);

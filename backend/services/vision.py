@@ -6,13 +6,13 @@ from datetime import datetime, timezone
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
-_anthropic_client: anthropic.Anthropic | None = None
+_anthropic_client: anthropic.AsyncAnthropic | None = None
 
 
-def get_anthropic_client() -> anthropic.Anthropic:
+def get_anthropic_client() -> anthropic.AsyncAnthropic:
     global _anthropic_client
     if _anthropic_client is None:
-        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        _anthropic_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     return _anthropic_client
 
 
@@ -49,10 +49,10 @@ def _time_ago(timestamp_str: str) -> str:
         return f"about {days} day{'s' if days != 1 else ''} ago"
 
 
-def _classify_intent(question: str) -> str:
+async def _classify_intent(question: str) -> str:
     """Returns 'VISUAL' if the question is about locating something, 'CHAT' otherwise."""
     client = get_anthropic_client()
-    response = client.messages.create(
+    response = await client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=5,
         messages=[{
@@ -69,11 +69,11 @@ async def ask_claude_about_frames(question: str, frames: list[dict]) -> dict:
     Send the top matching frames + user question to Claude Vision.
     Returns the answer text and best matching frame.
     """
-    intent = _classify_intent(question)
+    intent = await _classify_intent(question)
 
     if intent == "CHAT":
         client = get_anthropic_client()
-        response = client.messages.create(
+        response = await client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=150,
             messages=[{
@@ -146,7 +146,7 @@ Rules:
     })
 
     client = get_anthropic_client()
-    response = client.messages.create(
+    response = await client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=200,
         messages=[{"role": "user", "content": content}],

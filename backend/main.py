@@ -147,7 +147,9 @@ class AskRequest(BaseModel):
 
 @app.post("/api/ask")
 async def ask(req: AskRequest):
-    frames = search_frames(req.question, match_count=5)
+    # search_frames is synchronous (CLIP embed + Supabase RPC) — run in thread pool
+    # so it doesn't block the event loop and freeze the live video feed
+    frames = await asyncio.to_thread(search_frames, req.question, match_count=5)
     result = await ask_claude_about_frames(req.question, frames)
     return result
 
