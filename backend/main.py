@@ -154,6 +154,27 @@ async def ask(req: AskRequest):
     return result
 
 
+# --- Text-to-Speech (edge-tts, free neural voices) ---
+
+class TTSRequest(BaseModel):
+    text: str
+
+
+@app.post("/api/tts")
+async def tts(req: TTSRequest):
+    import edge_tts
+    communicate = edge_tts.Communicate(req.text, voice="en-US-AndrewNeural", rate="+5%")
+    audio_chunks = []
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_chunks.append(chunk["data"])
+    if not audio_chunks:
+        raise HTTPException(status_code=500, detail="TTS failed")
+    audio = b"".join(audio_chunks)
+    return Response(content=audio, media_type="audio/mpeg",
+                    headers={"Cache-Control": "no-store"})
+
+
 # --- Debug: inspect database state ---
 
 @app.get("/api/debug")

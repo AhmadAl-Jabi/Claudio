@@ -348,6 +348,9 @@
     let queryRecognizer = null;
     let silenceTimer    = null;
 
+    // Single reusable Audio element — must be unlocked during a user gesture (iOS requirement)
+    const audioPlayer = new Audio();
+
     function setVoicePhase(phase, label, transcript) {
       voicePhase             = phase;
       voiceDot.className     = 'voice-dot ' + phase;
@@ -465,46 +468,37 @@
       }
     }
 
-    function pickMaleVoice() {
-      const voices = window.speechSynthesis.getVoices();
-      // Priority list of known modern male English voices (iOS + Chrome)
-      const preferred = ['Aaron', 'Arthur', 'Daniel', 'Google UK English Male', 'Tom', 'Nathan', 'Microsoft Guy'];
-      for (const name of preferred) {
-        const v = voices.find(v => v.name.includes(name) && v.lang.startsWith('en'));
-        if (v) return v;
-      }
-      // Fallback: any English voice that doesn't have a common female name
-      return voices.find(v =>
-        v.lang.startsWith('en') &&
-        !v.name.match(/samantha|victoria|karen|moira|fiona|veena|zira|susan|hazel|kate|serena|siri/i)
-      ) || null;
-    }
-
-    function speakAnswer(text) {
+    async function speakAnswer(text) {
       setVoicePhase('speaking', 'Speaking...', text);
-      window.speechSynthesis.cancel();
-      const utt = new SpeechSynthesisUtterance(text);
-      utt.lang  = 'en-US';
-      utt.rate  = 1.05;
-      utt.pitch = 1.0;
-      const voice = pickMaleVoice();
-      if (voice) utt.voice = voice;
-      // Guard: onend, onerror, and fallback timer can all fire — only act once
-      let fallbackTimer = null;
-      let finished = false;
+      const serverUrl = serverUrlInput.value.replace(/\/+$/, '') || window.location.origin;
+
+      let prevUrl = null;
       function done() {
-        if (finished) return;
-        finished = true;
-        clearTimeout(fallbackTimer);
-        // Delay before re-activating mic so iOS fully releases the audio session
+        if (prevUrl) { URL.revokeObjectURL(prevUrl); prevUrl = null; }
         if (voiceEnabled) setTimeout(startWakeWord, 700);
       }
-      utt.onend   = done;
-      utt.onerror = done;
-      // ~80 ms per word + 3 s buffer as worst-case timeout
-      const wordCount = text.split(/\s+/).length;
-      fallbackTimer = setTimeout(done, wordCount * 80 + 3000);
-      window.speechSynthesis.speak(utt);
+
+      try {
+        const res = await fetch(`${serverUrl}/api/tts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        if (!res.ok) throw new Error('TTS failed');
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        prevUrl = url;
+
+        // Reuse the pre-unlocked audioPlayer element (iOS requires play() from a user gesture;
+        // the element was unlocked when the user tapped "Mic On")
+        audioPlayer.onended = done;
+        audioPlayer.onerror = done;
+        audioPlayer.src = url;
+        audioPlayer.load();
+        audioPlayer.play().catch(done);
+      } catch {
+        done();
+      }
     }
 
     // ── Toggle voice on/off ──────────────────────────────────────────────────
@@ -514,8 +508,9 @@
       voiceEnabled = true;
       voiceBtn.textContent = 'Mic On';
       voiceBtn.classList.add('active');
-      // Prime speechSynthesis during the user gesture so iOS unblocks audio
-      window.speechSynthesis.speak(new SpeechSynthesisUtterance(''));
+      // Unlock audioPlayer on iOS — must happen synchronously inside a user gesture handler
+      audioPlayer.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+      audioPlayer.play().catch(() => {});
       startWakeWord();
     }
 
@@ -524,7 +519,7 @@
       clearTimeout(silenceTimer);
       if (wakeRecognizer)  { try { wakeRecognizer.abort();  } catch {} wakeRecognizer  = null; }
       if (queryRecognizer) { try { queryRecognizer.abort(); } catch {} queryRecognizer = null; }
-      window.speechSynthesis.cancel();
+      audioPlayer.pause();
       voiceBtn.textContent = 'Mic Off';
       voiceBtn.classList.remove('active');
       setVoicePhase('off', 'Voice off', '');
