@@ -56,19 +56,19 @@ async def ask_claude_about_frames(question: str, frames: list[dict]) -> dict:
     """
     if not frames:
         return {
-            "answer": "I haven't seen that in my recent memory. Could you describe it differently?",
+            "answer": "I haven't seen that recently.",
             "best_frame": None,
             "all_frames": [],
         }
 
-    # Build the content array: images interleaved with timestamps
+    # Build the content array: clips interleaved with time context
     content = []
     loaded = 0
+    loaded_frames = []  # frames that actually loaded, in order
     async with httpx.AsyncClient(timeout=10.0) as http:
-        for i, frame in enumerate(frames):
+        for frame in frames:
             resp = await http.get(frame["image_url"])
             if resp.status_code != 200:
-                # Storage URL returned an error (e.g. bucket not public); skip this frame.
                 continue
             image_b64 = base64.b64encode(resp.content).decode("utf-8")
             content_type = _detect_media_type(resp.content)
@@ -84,66 +84,67 @@ async def ask_claude_about_frames(question: str, frames: list[dict]) -> dict:
             })
             content.append({
                 "type": "text",
-                "text": f"[Image {i + 1}, captured {time_ago}{(' at ' + ts) if ts else ''}]",
+                "text": f"[Clip {loaded + 1}, recorded {time_ago}]",
             })
+            loaded_frames.append(frame)
             loaded += 1
 
     if loaded == 0:
         return {
-            "answer": (
-                "I found relevant moments in memory but couldn't load the images "
-                "(check that the 'frame-images' Supabase Storage bucket is set to public)."
-            ),
+            "answer": "I haven't seen that recently.",
             "best_frame": None,
             "all_frames": [],
         }
 
     content.append({
         "type": "text",
-        "text": f"""You are Claudio, a visual memory assistant for someone with memory difficulties.
+        "text": f"""You are Claudio, a memory assistant. You have been continuously watching the user's environment and these clips are from your recent memory.
+
 The user is asking: "{question}"
 
-Above are the {loaded} most relevant frames from the user's recent environment, with timestamps.
-
-Instructions:
-- Examine each image carefully
-- Answer the user's question based on what you see
-- Be specific about locations ("on the kitchen counter", "left side of the desk")
-- Include how long ago you saw it ("about 12 minutes ago")
-- If no image is relevant, say "I haven't seen that recently — could you describe it differently?"
-- Be warm, patient, and reassuring
-- Keep your answer to 1-3 sentences
-- End with: BEST_MATCH: <image number> (so we can highlight it)""",
+Rules:
+- You are recalling from continuous memory. Never say "image", "photo", "picture", or "frame". You may say "I saw" or "I noticed" etc.
+- Only use plain ASCII characters in your response (no special dashes or symbols).
+- If you can see what they are asking about: describe where it is and always include how long ago (e.g. "about 5 minutes ago"). Be specific about the location. Max 2 sentences.
+- If none of the clips show what they are asking about: say you have not seen it recently. Max 1 sentence.
+- End your response with exactly one of:
+  BEST_MATCH: <clip number>
+  BEST_MATCH: NONE""",
     })
 
     client = get_anthropic_client()
     response = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=300,
+        max_tokens=200,
         messages=[{"role": "user", "content": content}],
     )
 
     raw_answer = response.content[0].text
 
-    # Parse out the BEST_MATCH indicator
-    best_match_idx = 0
+    # Parse the BEST_MATCH token
+    best_match_idx = None
     answer_text = raw_answer
     if "BEST_MATCH:" in raw_answer:
         parts = raw_answer.rsplit("BEST_MATCH:", 1)
         answer_text = parts[0].strip()
-        try:
-            best_match_idx = int(parts[1].strip()) - 1  # 1-indexed to 0-indexed
-        except ValueError:
-            best_match_idx = 0
+        token = parts[1].strip().upper()
+        if token != "NONE":
+            try:
+                idx = int(token) - 1  # 1-indexed to 0-indexed
+                best_match_idx = max(0, min(idx, len(loaded_frames) - 1))
+            except ValueError:
+                best_match_idx = None
 
-    best_match_idx = max(0, min(best_match_idx, len(frames) - 1))
+    best_frame = None
+    if best_match_idx is not None:
+        best_frame = {
+            "image_url": loaded_frames[best_match_idx].get("image_url"),
+            "timestamp": loaded_frames[best_match_idx].get("timestamp", ""),
+        }
 
     return {
         "answer": answer_text,
-        "best_frame": {
-            "image_url": frames[best_match_idx].get("image_url"),
-            "timestamp": frames[best_match_idx].get("timestamp", ""),
-        },
+        "best_frame": best_frame,
         "all_frames": [
             {
                 "image_url": f.get("image_url"),
