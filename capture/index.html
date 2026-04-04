@@ -72,15 +72,8 @@
       transition: background 0.2s;
     }
 
-    #toggleBtn.start {
-      background: #22c55e;
-      color: #000;
-    }
-
-    #toggleBtn.stop {
-      background: #ef4444;
-      color: #fff;
-    }
+    #toggleBtn.start { background: #22c55e; color: #000; }
+    #toggleBtn.stop  { background: #ef4444; color: #fff; }
 
     .status {
       display: flex;
@@ -98,10 +91,78 @@
       flex-shrink: 0;
     }
 
-    .dot.idle { background: #555; }
+    .dot.idle    { background: #555; }
     .dot.sending { background: #facc15; }
-    .dot.ok { background: #22c55e; }
-    .dot.error { background: #ef4444; }
+    .dot.ok      { background: #22c55e; }
+    .dot.error   { background: #ef4444; }
+
+    /* Voice row */
+    .voice-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #voiceBtn {
+      padding: 8px 18px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      background: #334155;
+      color: #fff;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+
+    #voiceBtn.active { background: #6366f1; }
+
+    .voice-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .voice-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: #555;
+      transition: background 0.2s;
+    }
+
+    .voice-dot.off       { background: #555; }
+    .voice-dot.listening { background: #6366f1; animation: pulse 1.6s infinite; }
+    .voice-dot.recording { background: #ef4444; animation: pulse 0.6s infinite; }
+    .voice-dot.thinking  { background: #facc15; animation: pulse 0.8s infinite; }
+    .voice-dot.speaking  { background: #22c55e; animation: pulse 1s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+
+    #voiceLabel {
+      color: #aaa;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #transcriptText {
+      color: #e2e8f0;
+      font-style: italic;
+      font-size: 12px;
+      min-height: 16px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
   </style>
 </head>
 <body>
@@ -121,28 +182,37 @@
         <span>frames sent</span>
       </div>
     </div>
+    <div class="voice-row">
+      <button id="voiceBtn">Mic Off</button>
+      <div class="voice-status">
+        <span class="voice-dot off" id="voiceDot"></span>
+        <span id="voiceLabel">Voice off</span>
+      </div>
+    </div>
+    <div id="transcriptText"></div>
   </div>
 
   <video id="video" autoplay playsinline muted></video>
   <canvas id="canvas"></canvas>
 
   <script>
-    const video = document.getElementById('video');
-    const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
-    const toggleBtn = document.getElementById('toggleBtn');
-    const serverUrlInput = document.getElementById('serverUrl');
-    const dot = document.getElementById('dot');
-    const statusText = document.getElementById('statusText');
-    const frameCountEl = document.getElementById('frameCount');
+    // ── Camera / frame capture ───────────────────────────────────────────────
 
-    let capturing = false;
+    const video          = document.getElementById('video');
+    const canvas         = document.getElementById('canvas');
+    const ctx            = canvas.getContext('2d');
+    const toggleBtn      = document.getElementById('toggleBtn');
+    const serverUrlInput = document.getElementById('serverUrl');
+    const dot            = document.getElementById('dot');
+    const statusText     = document.getElementById('statusText');
+    const frameCountEl   = document.getElementById('frameCount');
+
+    let capturing      = false;
     let clipIntervalId = null;
     let feedIntervalId = null;
-    let frameCount = 0;
-    let sending = false;
+    let frameCount     = 0;
+    let sending        = false;
 
-    // Restore last-used server URL
     const saved = localStorage.getItem('claudio_server');
     if (saved) serverUrlInput.value = saved;
 
@@ -152,23 +222,14 @@
       });
       video.srcObject = stream;
       await video.play();
-      const w = video.videoWidth;
-      const h = video.videoHeight;
-      // If portrait, rotate to landscape
-      if (h > w) {
-        canvas.width = h;
-        canvas.height = w;
-      } else {
-        canvas.width = w;
-        canvas.height = h;
-      }
+      const w = video.videoWidth, h = video.videoHeight;
+      if (h > w) { canvas.width = h; canvas.height = w; }
+      else        { canvas.width = w; canvas.height = h; }
     }
 
     function drawRotated() {
-      const w = video.videoWidth;
-      const h = video.videoHeight;
+      const w = video.videoWidth, h = video.videoHeight;
       if (h > w) {
-        // Portrait → rotate 90° to landscape
         ctx.save();
         ctx.translate(canvas.width / 2, canvas.height / 2);
         ctx.rotate(-Math.PI / 2);
@@ -185,58 +246,32 @@
     }
 
     async function captureAndSend() {
-      if (sending) return; // skip if previous frame still in-flight
+      if (sending) return;
       sending = true;
-
-      // Default to same origin if no URL entered (works when served from backend)
       const serverUrl = serverUrlInput.value.replace(/\/+$/, '') || window.location.origin;
-
-      // Draw current video frame to canvas
       drawRotated();
-
-      // Convert to JPEG blob at 0.6 quality
       const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.6));
-      if (!blob) {
-        setStatus('error', 'Blob failed');
-        sending = false;
-        return;
-      }
-
+      if (!blob) { setStatus('error', 'Blob failed'); sending = false; return; }
       setStatus('sending', 'Sending...');
-
       const formData = new FormData();
       formData.append('file', blob, `frame_${Date.now()}.jpg`);
-
       try {
-        const res = await fetch(`${serverUrl}/api/frames`, {
-          method: 'POST',
-          body: formData
-        });
-
+        const res = await fetch(`${serverUrl}/api/frames`, { method: 'POST', body: formData });
         if (res.ok) {
           const data = await res.json();
-          if (data.status === 'stored') {
-            frameCount++;
-            frameCountEl.textContent = frameCount;
-            setStatus('ok', 'Stored');
-          } else if (data.status === 'skipped') {
-            setStatus('ok', 'Skipped (dup)');
-          } else {
-            setStatus('ok', `OK`);
-          }
+          if (data.status === 'stored')       { frameCount++; frameCountEl.textContent = frameCount; setStatus('ok', 'Stored'); }
+          else if (data.status === 'skipped') setStatus('ok', 'Skipped (dup)');
+          else                                setStatus('ok', 'OK');
         } else {
           setStatus('error', `HTTP ${res.status}`);
         }
-      } catch (err) {
-        setStatus('error', 'Connection failed');
-      }
-
+      } catch { setStatus('error', 'Connection failed'); }
       sending = false;
     }
 
     let feedSocket = null;
-    let feedReady = false;
-    let feedBusy = false;
+    let feedReady  = false;
+    let feedBusy   = false;
 
     function getWsUrl() {
       const serverUrl = serverUrlInput.value.replace(/\/+$/, '') || window.location.origin;
@@ -248,31 +283,19 @@
       feedBusy = true;
       drawRotated();
       canvas.toBlob(blob => {
-        if (blob && feedReady) {
-          try { feedSocket.send(blob); } catch {}
-        }
+        if (blob && feedReady) { try { feedSocket.send(blob); } catch {} }
         feedBusy = false;
       }, 'image/jpeg', 0.3);
     }
 
     function connectFeedSocket() {
-      const url = getWsUrl();
-      console.log('Connecting feed WebSocket to:', url);
-      feedSocket = new WebSocket(url);
+      feedSocket = new WebSocket(getWsUrl());
       feedSocket.binaryType = 'arraybuffer';
-      feedSocket.onopen = () => {
-        console.log('Feed WebSocket connected');
-        feedReady = true;
-        feedIntervalId = setInterval(sendDisplayFrame, 100);
-      };
-      feedSocket.onerror = (e) => {
-        console.error('Feed WebSocket error:', e);
-      };
+      feedSocket.onopen  = () => { feedReady = true; feedIntervalId = setInterval(sendDisplayFrame, 100); };
+      feedSocket.onerror = () => {};
       feedSocket.onclose = () => {
-        console.log('Feed WebSocket closed');
         feedReady = false;
         clearInterval(feedIntervalId);
-        // Reconnect if still capturing
         if (capturing) setTimeout(connectFeedSocket, 1000);
       };
     }
@@ -281,13 +304,9 @@
       localStorage.setItem('claudio_server', serverUrlInput.value);
       capturing = true;
       toggleBtn.textContent = 'Stop Capture';
-      toggleBtn.className = 'stop';
+      toggleBtn.className   = 'stop';
       setStatus('ok', 'Running');
-
-      // WebSocket for smooth live feed (~60fps)
       connectFeedSocket();
-
-      // CLIP embedding every 2 seconds
       captureAndSend();
       clipIntervalId = setInterval(captureAndSend, 2000);
     }
@@ -296,24 +315,198 @@
       capturing = false;
       clearInterval(clipIntervalId);
       clearInterval(feedIntervalId);
-      clipIntervalId = null;
-      feedIntervalId = null;
+      clipIntervalId = feedIntervalId = null;
       feedReady = false;
       if (feedSocket) { feedSocket.close(); feedSocket = null; }
       toggleBtn.textContent = 'Start Capture';
-      toggleBtn.className = 'start';
+      toggleBtn.className   = 'start';
       setStatus('idle', 'Stopped');
     }
 
     toggleBtn.addEventListener('click', () => {
-      if (capturing) stopCapture();
-      else startCapture();
+      if (capturing) stopCapture(); else startCapture();
     });
 
-    // Init camera on load
-    initCamera().catch(err => {
-      setStatus('error', 'Camera denied');
-      console.error('Camera error:', err);
+    initCamera().catch(() => setStatus('error', 'Camera denied'));
+
+
+    // ── Voice / wake-word ────────────────────────────────────────────────────
+
+    const voiceBtn     = document.getElementById('voiceBtn');
+    const voiceDot     = document.getElementById('voiceDot');
+    const voiceLabel   = document.getElementById('voiceLabel');
+    const transcriptEl = document.getElementById('transcriptText');
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const SILENCE_MS        = 1500;
+    // Accept common mishearings of "Hey Claudio"
+    const WAKE_WORDS = ['hey claudio', 'hey claudia', 'hey clodio', 'claudio'];
+
+    let voiceEnabled    = false;
+    let voicePhase      = 'off';
+    let wakeRecognizer  = null;
+    let queryRecognizer = null;
+    let silenceTimer    = null;
+
+    function setVoicePhase(phase, label, transcript) {
+      voicePhase             = phase;
+      voiceDot.className     = 'voice-dot ' + phase;
+      voiceLabel.textContent = label;
+      transcriptEl.textContent = transcript || '';
+    }
+
+    // ── Wake-word loop ───────────────────────────────────────────────────────
+
+    function startWakeWord() {
+      if (!SpeechRecognition || !voiceEnabled) return;
+      // Abort any stale recognizer before creating a new one
+      if (wakeRecognizer) { try { wakeRecognizer.abort(); } catch {} wakeRecognizer = null; }
+      setVoicePhase('listening', 'Say "Hey Claudio"...', '');
+
+      wakeRecognizer = new SpeechRecognition();
+      wakeRecognizer.continuous      = true;
+      wakeRecognizer.interimResults  = true;
+      wakeRecognizer.lang            = 'en-US';
+      wakeRecognizer.maxAlternatives = 1;
+
+      wakeRecognizer.onresult = (event) => {
+        let heard = '';
+        for (let i = 0; i < event.results.length; i++) {
+          heard += event.results[i][0].transcript.toLowerCase() + ' ';
+        }
+        if (WAKE_WORDS.some(w => heard.includes(w))) {
+          wakeRecognizer.abort();
+          startQueryMode();
+        }
+      };
+
+      // Browser killed the session (iOS time limit, etc.) — restart
+      wakeRecognizer.onend = () => {
+        if (voiceEnabled && voicePhase === 'listening') setTimeout(startWakeWord, 400);
+      };
+
+      wakeRecognizer.onerror = (e) => {
+        if (e.error === 'aborted') return; // intentional abort — onend handles cleanup
+        if (e.error === 'no-speech') return; // normal timeout — onend will restart
+        // audio-capture or other transient errors: retry after a short delay
+        console.warn('Wake recognizer error:', e.error);
+        if (voiceEnabled && voicePhase === 'listening') setTimeout(startWakeWord, 600);
+      };
+
+      wakeRecognizer.start();
+    }
+
+    // ── Query recording ──────────────────────────────────────────────────────
+
+    function startQueryMode() {
+      setVoicePhase('recording', 'Listening...', '');
+      if (navigator.vibrate) navigator.vibrate(100);
+
+      queryRecognizer = new SpeechRecognition();
+      queryRecognizer.continuous      = true;
+      queryRecognizer.interimResults  = true;
+      queryRecognizer.lang            = 'en-US';
+      queryRecognizer.maxAlternatives = 1;
+
+      let finalText  = '';
+      let interim    = '';
+      let dispatched = false;
+
+      function dispatch() {
+        if (dispatched) return;
+        dispatched = true;
+        clearTimeout(silenceTimer);
+        try { queryRecognizer.abort(); } catch {}
+        const question = (finalText + ' ' + interim).trim();
+        if (question) sendVoiceQuery(question);
+        else if (voiceEnabled) startWakeWord();
+      }
+
+      queryRecognizer.onresult = (event) => {
+        clearTimeout(silenceTimer);
+        finalText = '';
+        interim   = '';
+        for (let i = 0; i < event.results.length; i++) {
+          if (event.results[i].isFinal) finalText += event.results[i][0].transcript;
+          else                           interim   += event.results[i][0].transcript;
+        }
+        transcriptEl.textContent = (finalText + interim).trim();
+        // Commit after 1.5 s of no new speech
+        silenceTimer = setTimeout(dispatch, SILENCE_MS);
+      };
+
+      // Browser ended the session before our silence timer fired
+      queryRecognizer.onend   = () => dispatch();
+      queryRecognizer.onerror = (e) => { if (e.error !== 'aborted') dispatch(); };
+
+      queryRecognizer.start();
+    }
+
+    // ── Send query and speak response ────────────────────────────────────────
+
+    async function sendVoiceQuery(question) {
+      setVoicePhase('thinking', 'Thinking...', question);
+      const serverUrl = serverUrlInput.value.replace(/\/+$/, '') || window.location.origin;
+      try {
+        const res  = await fetch(`${serverUrl}/api/ask`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question }),
+        });
+        const data = res.ok ? await res.json() : null;
+        speakAnswer(data ? data.answer : "Sorry, I couldn't reach my memory right now.");
+      } catch {
+        speakAnswer("Sorry, I couldn't reach my memory right now.");
+      }
+    }
+
+    function speakAnswer(text) {
+      setVoicePhase('speaking', 'Speaking...', text);
+      window.speechSynthesis.cancel();
+      const utt   = new SpeechSynthesisUtterance(text);
+      utt.lang    = 'en-US';
+      utt.rate    = 1.0;
+      utt.pitch   = 1.0;
+      // Fallback: if onend never fires (iOS bug), return after estimated duration
+      let fallbackTimer = null;
+      function done() {
+        clearTimeout(fallbackTimer);
+        // Delay before re-activating mic so iOS fully releases the audio session
+        if (voiceEnabled) setTimeout(startWakeWord, 700);
+      }
+      utt.onend   = done;
+      utt.onerror = done;
+      // ~80 ms per word + 3 s buffer as worst-case timeout
+      const wordCount = text.split(/\s+/).length;
+      fallbackTimer = setTimeout(done, wordCount * 80 + 3000);
+      window.speechSynthesis.speak(utt);
+    }
+
+    // ── Toggle voice on/off ──────────────────────────────────────────────────
+
+    function enableVoice() {
+      if (!SpeechRecognition) { alert('Speech recognition is not supported on this browser.'); return; }
+      voiceEnabled = true;
+      voiceBtn.textContent = 'Mic On';
+      voiceBtn.classList.add('active');
+      // Prime speechSynthesis during the user gesture so iOS unblocks audio
+      window.speechSynthesis.speak(new SpeechSynthesisUtterance(''));
+      startWakeWord();
+    }
+
+    function disableVoice() {
+      voiceEnabled = false;
+      clearTimeout(silenceTimer);
+      if (wakeRecognizer)  { try { wakeRecognizer.abort();  } catch {} wakeRecognizer  = null; }
+      if (queryRecognizer) { try { queryRecognizer.abort(); } catch {} queryRecognizer = null; }
+      window.speechSynthesis.cancel();
+      voiceBtn.textContent = 'Mic Off';
+      voiceBtn.classList.remove('active');
+      setVoicePhase('off', 'Voice off', '');
+    }
+
+    voiceBtn.addEventListener('click', () => {
+      if (voiceEnabled) disableVoice(); else enableVoice();
     });
   </script>
 
