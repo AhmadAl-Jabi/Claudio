@@ -472,11 +472,15 @@
       setVoicePhase('speaking', 'Speaking...', text);
       const serverUrl = serverUrlInput.value.replace(/\/+$/, '') || window.location.origin;
 
-      let prevUrl = null;
       function done() {
-        if (prevUrl) { URL.revokeObjectURL(prevUrl); prevUrl = null; }
         if (voiceEnabled) setTimeout(startWakeWord, 700);
       }
+
+      // Use streaming MediaSource where supported (Chrome/Android) to cut start-of-speech latency.
+      // iOS Safari does not support MediaSource for audio, so fall back to the full-blob approach there.
+      const canStream = typeof MediaSource !== 'undefined'
+        && typeof MediaSource.isTypeSupported === 'function'
+        && MediaSource.isTypeSupported('audio/mpeg');
 
       try {
         const res = await fetch(`${serverUrl}/api/tts`, {
@@ -485,17 +489,51 @@
           body: JSON.stringify({ text }),
         });
         if (!res.ok) throw new Error('TTS failed');
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        prevUrl = url;
 
-        // Reuse the pre-unlocked audioPlayer element (iOS requires play() from a user gesture;
-        // the element was unlocked when the user tapped "Mic On")
-        audioPlayer.onended = done;
-        audioPlayer.onerror = done;
-        audioPlayer.src = url;
-        audioPlayer.load();
-        audioPlayer.play().catch(done);
+        if (canStream && res.body) {
+          // ── Streaming path (Chrome / Android) ──────────────────────────────
+          const mediaSource = new MediaSource();
+          const objectUrl = URL.createObjectURL(mediaSource);
+          audioPlayer.onended = () => { URL.revokeObjectURL(objectUrl); done(); };
+          audioPlayer.onerror = () => { URL.revokeObjectURL(objectUrl); done(); };
+          audioPlayer.src = objectUrl;
+
+          await new Promise(r => mediaSource.addEventListener('sourceopen', r, { once: true }));
+          const sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+
+          const reader = res.body.getReader();
+          let playing = false;
+          while (true) {
+            const { done: eof, value } = await reader.read();
+            if (eof) {
+              if (sourceBuffer.updating) {
+                await new Promise(r => sourceBuffer.addEventListener('updateend', r, { once: true }));
+              }
+              mediaSource.endOfStream();
+              break;
+            }
+            if (sourceBuffer.updating) {
+              await new Promise(r => sourceBuffer.addEventListener('updateend', r, { once: true }));
+            }
+            sourceBuffer.appendBuffer(value);
+            // Start playback as soon as the first chunk is buffered
+            if (!playing) {
+              playing = true;
+              audioPlayer.play().catch(done);
+            }
+          }
+        } else {
+          // ── Blob fallback (iOS Safari) ──────────────────────────────────────
+          // Reuse the pre-unlocked audioPlayer element (iOS requires play() from a user gesture;
+          // the element was unlocked when the user tapped "Mic On")
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          audioPlayer.onended = () => { URL.revokeObjectURL(url); done(); };
+          audioPlayer.onerror = () => { URL.revokeObjectURL(url); done(); };
+          audioPlayer.src = url;
+          audioPlayer.load();
+          audioPlayer.play().catch(done);
+        }
       } catch {
         done();
       }

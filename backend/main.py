@@ -10,7 +10,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from services.clip import embed_image, cosine_similarity
@@ -164,15 +164,59 @@ class TTSRequest(BaseModel):
 async def tts(req: TTSRequest):
     import edge_tts
     communicate = edge_tts.Communicate(req.text, voice="en-US-AndrewNeural", rate="+5%")
-    audio_chunks = []
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio_chunks.append(chunk["data"])
-    if not audio_chunks:
-        raise HTTPException(status_code=500, detail="TTS failed")
-    audio = b"".join(audio_chunks)
-    return Response(content=audio, media_type="audio/mpeg",
-                    headers={"Cache-Control": "no-store"})
+
+    async def generate():
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                yield chunk["data"]
+
+    return StreamingResponse(
+        generate(),
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# --- Manual reset: wipe all frames from storage + database ---
+
+@app.delete("/api/reset")
+def reset_all():
+    """
+    Wipe every stored frame from both Supabase Storage and the frames table.
+    Resets the in-memory dedup state too.
+    Call this manually from the terminal when you want a clean slate:
+        curl -X DELETE http://localhost:8000/api/reset
+    The code never calls this automatically.
+    """
+    global _last_embedding
+    from services.storage import get_client, BUCKET_NAME
+
+    client = get_client()
+
+    # 1. Remove all files from the 'frames/' folder in storage (best-effort)
+    deleted_files = 0
+    try:
+        files = client.storage.from_(BUCKET_NAME).list("frames")
+        if files and isinstance(files, list):
+            paths = [f"frames/{f['name']}" for f in files if f.get("name")]
+            if paths:
+                client.storage.from_(BUCKET_NAME).remove(paths)
+                deleted_files = len(paths)
+    except Exception as exc:
+        logging.warning("Storage cleanup partial error (files may already be gone): %s", exc)
+
+    # 2. Delete all rows from the frames table
+    result = client.table("frames").delete().gte("timestamp", "1970-01-01T00:00:00+00:00").execute()
+    deleted_records = len(result.data) if result.data else 0
+
+    # 3. Reset in-memory dedup cache
+    _last_embedding = None
+
+    return {
+        "status": "reset",
+        "deleted_files": deleted_files,
+        "deleted_records": deleted_records,
+    }
 
 
 # --- Debug: inspect database state ---

@@ -1,8 +1,11 @@
 import os
+import logging
 import base64
 import httpx
 import anthropic
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
@@ -29,35 +32,45 @@ def _detect_media_type(data: bytes) -> str:
     return "image/jpeg"
 
 
-def _time_ago(timestamp_str: str) -> str:
-    """Convert an ISO timestamp to a human-readable 'X minutes ago' string."""
+def _format_clip_time(timestamp_str: str) -> str:
+    """
+    Return a label like "3:24 PM (about 5 minutes ago)" for a clip timestamp.
+    Uses the server's local timezone for the clock time.
+    """
     ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
     now = datetime.now(timezone.utc)
     delta = now - ts
     seconds = int(delta.total_seconds())
 
+    # Relative part
     if seconds < 60:
-        return "just now"
+        relative = "just now"
     elif seconds < 3600:
         minutes = seconds // 60
-        return f"about {minutes} minute{'s' if minutes != 1 else ''} ago"
+        relative = f"about {minutes} minute{'s' if minutes != 1 else ''} ago"
     elif seconds < 86400:
         hours = seconds // 3600
-        return f"about {hours} hour{'s' if hours != 1 else ''} ago"
+        relative = f"about {hours} hour{'s' if hours != 1 else ''} ago"
     else:
         days = seconds // 86400
-        return f"about {days} day{'s' if days != 1 else ''} ago"
+        relative = f"about {days} day{'s' if days != 1 else ''} ago"
+
+    # Exact local clock time (strip leading zero for Windows/Unix compat)
+    local_ts = ts.astimezone()
+    clock = local_ts.strftime("%I:%M %p").lstrip("0") or local_ts.strftime("%I:%M %p")
+
+    return f"{clock} ({relative})"
 
 
 async def _classify_intent(question: str) -> str:
-    """Returns 'VISUAL' if the question is about locating something, 'CHAT' otherwise."""
+    """Returns 'VISUAL' if the question is about locating or timing something, 'CHAT' otherwise."""
     client = get_anthropic_client()
     response = await client.messages.create(
         model="claude-sonnet-4-20250514",
         max_tokens=5,
         messages=[{
             "role": "user",
-            "content": f'The user said: "{question}"\n\n did the user mention they can\'t find something, ask where something is, or needs help locating an item? If yes, reply with "VISUAL". If no, reply with "CHAT".'
+            "content": f'The user said: "{question}"\n\nDid the user ask where something is, when something was last seen or placed, or need help locating an item? If yes, reply with "VISUAL". If no, reply with "CHAT".'
         }],
     )
     result = response.content[0].text.strip().upper()
@@ -102,11 +115,19 @@ async def ask_claude_about_frames(question: str, frames: list[dict]) -> dict:
         for frame in frames:
             resp = await http.get(frame["image_url"])
             if resp.status_code != 200:
+                logger.warning(
+                    "Frame image not accessible (HTTP %s), skipping: %s",
+                    resp.status_code, frame.get("image_url", "?"),
+                )
                 continue
             image_b64 = base64.b64encode(resp.content).decode("utf-8")
             content_type = _detect_media_type(resp.content)
             ts = frame.get("timestamp") or ""
-            time_ago = _time_ago(ts) if ts else "unknown time"
+            clip_time = _format_clip_time(ts) if ts else "unknown time"
+            content.append({
+                "type": "text",
+                "text": f"[#{loaded + 1} | {clip_time}]",
+            })
             content.append({
                 "type": "image",
                 "source": {
@@ -114,10 +135,6 @@ async def ask_claude_about_frames(question: str, frames: list[dict]) -> dict:
                     "media_type": content_type,
                     "data": image_b64,
                 },
-            })
-            content.append({
-                "type": "text",
-                "text": f"[Clip {loaded + 1}, recorded {time_ago}]",
             })
             loaded_frames.append(frame)
             loaded += 1
@@ -131,17 +148,21 @@ async def ask_claude_about_frames(question: str, frames: list[dict]) -> dict:
 
     content.append({
         "type": "text",
-        "text": f"""You are Claudio, a memory assistant. You have been continuously watching the user's environment and these clips are from your recent memory.
+        "text": f"""You are Claudio, an always-on memory assistant worn as glasses. You have been passively watching the user's environment.
 
 The user is asking: "{question}"
 
-Rules:
-- You are recalling from continuous memory. Never say "image", "photo", "picture", or "frame". You may say "I saw" or "I noticed" etc.
-- Only use plain ASCII characters in your response (no special dashes or symbols).
-- If you can see what they are asking about: describe where it is and always include how long ago (e.g. "about 5 minutes ago"). Be specific about the location. Max 2 sentences.
-- If none of the clips show what they are asking about: say you have not seen it recently. Max 1 sentence.
-- End your response with exactly one of:
-  BEST_MATCH: <clip number>
+Each observation above is labelled [#N | <time>]. Use these labels ONLY to select your BEST_MATCH number — never mention them in your spoken response.
+
+Rules for your response text:
+- Speak in first person as a continuous memory: "I saw...", "I noticed...", "It was...". NEVER say "clip", "image", "photo", "picture", "frame", "scene", "record", or any similar word.
+- NEVER describe or reference multiple observations. Pick the single best one and describe only that.
+- If you can identify what the user is asking about: state (1) the exact clock time from its label (e.g. "at 3:24 PM") and (2) precisely where it was. Max 2 sentences. Omitting the time is not allowed.
+- If none of the observations show what they are asking about: say you have not seen it recently. Do NOT mention any time. Max 1 sentence.
+- Only use plain ASCII characters (no special dashes or symbols).
+
+End your response with exactly one of:
+  BEST_MATCH: <N>
   BEST_MATCH: NONE""",
     })
 

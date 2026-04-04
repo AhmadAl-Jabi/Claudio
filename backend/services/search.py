@@ -40,7 +40,8 @@ def search_frames(query: str, match_count: int = 5, match_threshold: float = 0.1
             normalized = []
             for row in result.data:
                 row = dict(row)
-                if "timestamp" not in row:
+                # Try common alternative column names the RPC might use
+                if not row.get("timestamp"):
                     row["timestamp"] = (
                         row.get("captured_at")
                         or row.get("created_at")
@@ -49,6 +50,23 @@ def search_frames(query: str, match_count: int = 5, match_threshold: float = 0.1
                     )
                 row["image_url"] = _fix_url(row.get("image_url"))
                 normalized.append(row)
+
+            # The match_frames RPC often omits the timestamp column entirely.
+            # Batch-fetch it for any rows that are still missing it.
+            missing_ids = [r["id"] for r in normalized if not r.get("timestamp") and r.get("id")]
+            if missing_ids:
+                ts_result = (
+                    client.table("frames")
+                    .select("id, timestamp")
+                    .in_("id", missing_ids)
+                    .execute()
+                )
+                ts_map = {r["id"]: r["timestamp"] for r in (ts_result.data or [])}
+                for row in normalized:
+                    if not row.get("timestamp") and row.get("id") in ts_map:
+                        row["timestamp"] = ts_map[row["id"]]
+                logger.info("Enriched %d row(s) with timestamps from secondary lookup", len(missing_ids))
+
             return normalized
 
         logger.warning(
