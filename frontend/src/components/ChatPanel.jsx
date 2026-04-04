@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import MessageBubble from './MessageBubble'
 import ChatInput from './ChatInput'
 
-export default function ChatPanel() {
+export default function ChatPanel({ onStatusChange }) {
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(false)
   const scrollRef = useRef(null)
@@ -17,6 +17,7 @@ export default function ChatPanel() {
     const userMsg = { role: 'user', text }
     setMessages(prev => [...prev, userMsg])
     setLoading(true)
+    onStatusChange?.('thinking')
 
     try {
       const res = await fetch('/api/ask', {
@@ -42,15 +43,12 @@ export default function ChatPanel() {
       ])
     } finally {
       setLoading(false)
+      onStatusChange?.('idle')
     }
   }
 
   return (
     <div className="chat-panel">
-      <div className="chat-header">
-        <span className="chat-avatar">👓</span>
-        <span>Claudio</span>
-      </div>
       <div className="chat-messages" ref={scrollRef}>
         {messages.length === 0 && (
           <div className="chat-empty">
@@ -64,8 +62,9 @@ export default function ChatPanel() {
         {loading && (
           <div className="message assistant">
             <div className="bubble thinking">
-              <span className="dot-pulse"></span>
-              Analyzing...
+              <span className="dot-pulse" />
+              <span className="dot-pulse d2" />
+              <span className="dot-pulse d3" />
             </div>
           </div>
         )}

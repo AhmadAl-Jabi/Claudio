@@ -1,8 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 
-export default function LiveFeed() {
+export default function LiveFeed({ onFeedChange }) {
   const imgRef = useRef(null)
-  const [hasFrame, setHasFrame] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -17,7 +16,7 @@ export default function LiveFeed() {
             const url = URL.createObjectURL(blob)
             if (imgRef.current) {
               imgRef.current.src = url
-              setHasFrame(true)
+              onFeedChange?.(true)
             }
             if (prevUrl) URL.revokeObjectURL(prevUrl)
             prevUrl = url
@@ -37,12 +36,6 @@ export default function LiveFeed() {
   return (
     <div className="live-feed">
       <img ref={imgRef} alt="" />
-      {!hasFrame && (
-        <div className="feed-overlay">
-          <p>Waiting for camera feed...</p>
-          <p className="feed-hint">Open /capture on your phone and press Start</p>
-        </div>
-      )}
     </div>
   )
 }
