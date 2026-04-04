@@ -30,6 +30,10 @@ _latest_display_frame: bytes | None = None
 _frame_version = 0
 _frame_condition = asyncio.Condition()
 
+# Voice channel — connected WebSocket clients (phone + laptop)
+_voice_clients: set[WebSocket] = set()
+_voice_lock = asyncio.Lock()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -238,6 +242,81 @@ def debug():
             emb_preview = None
         previews.append({"id": f["id"], "timestamp": f["timestamp"], "image_url": f["image_url"], "embedding_preview": emb_preview})
     return {"total_frames": total, "frames_with_embedding": with_embedding, "recent_frames": previews}
+
+
+# --- Voice channel helpers ---
+
+async def _broadcast_voice(msg: dict, exclude: WebSocket | None = None):
+    """Send a JSON message to all connected voice clients, optionally skipping one."""
+    async with _voice_lock:
+        clients = list(_voice_clients)
+    dead = []
+    for ws in clients:
+        if ws is exclude:
+            continue
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            dead.append(ws)
+    if dead:
+        async with _voice_lock:
+            for ws in dead:
+                _voice_clients.discard(ws)
+
+
+async def _process_voice_question(question: str):
+    """Run the full ask pipeline and broadcast results to all voice clients."""
+    await _broadcast_voice({"type": "thinking"})
+    try:
+        frames = await asyncio.to_thread(search_frames, question, match_count=5)
+        result = await ask_claude_about_frames(question, frames)
+        await _broadcast_voice({
+            "type": "answer",
+            "answer": result["answer"],
+            "best_frame": result.get("best_frame"),
+            "all_frames": result.get("all_frames", []),
+        })
+    except Exception as exc:
+        logging.error("Voice question processing failed: %s", exc)
+        await _broadcast_voice({
+            "type": "answer",
+            "answer": "I had trouble accessing my memory right now.",
+            "best_frame": None,
+            "all_frames": [],
+        })
+
+
+# --- Voice WebSocket (phone → backend → laptop) ---
+
+@app.websocket("/ws/voice")
+async def voice_channel(ws: WebSocket):
+    """
+    Multiplex voice events between the phone and the laptop.
+    Phone sends:  {"type": "interim", "text": "..."}  — live transcription updates
+                  {"type": "question", "text": "..."}  — final query, triggers processing
+    Backend sends to laptop: "interim", "question", "thinking", "answer"
+    """
+    await ws.accept()
+    async with _voice_lock:
+        _voice_clients.add(ws)
+    try:
+        while True:
+            msg = await ws.receive_json()
+            msg_type = msg.get("type")
+            if msg_type == "interim":
+                # Relay live transcript to all other clients (i.e. the laptop)
+                await _broadcast_voice({"type": "interim", "text": msg.get("text", "")}, exclude=ws)
+            elif msg_type == "question":
+                question = msg.get("text", "").strip()
+                if question:
+                    # Relay the finalized question, then kick off processing
+                    await _broadcast_voice({"type": "question", "text": question}, exclude=ws)
+                    asyncio.create_task(_process_voice_question(question))
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        async with _voice_lock:
+            _voice_clients.discard(ws)
 
 
 # --- Live Feed WebSocket ---

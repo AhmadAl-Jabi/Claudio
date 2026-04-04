@@ -211,6 +211,33 @@
   border-bottom-left-radius: 5px;
 }
 
+/* ─── Live transcription bubble ──────────────────────────── */
+.live-bubble {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  opacity: 0.85;
+}
+
+.live-placeholder {
+  color: rgba(255, 255, 255, 0.35);
+  font-style: italic;
+}
+
+.live-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 13px;
+  background: rgba(255, 255, 255, 0.65);
+  margin-left: 3px;
+  vertical-align: middle;
+  border-radius: 1px;
+  animation: blink-cursor 1s step-end infinite;
+}
+
+@keyframes blink-cursor {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
 /* ─── Typing dots ─────────────────────────────────────────── */
 .bubble.thinking {
   display: flex;

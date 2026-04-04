@@ -348,13 +348,34 @@
     let queryRecognizer = null;
     let silenceTimer    = null;
 
-    // Single reusable Audio element — must be unlocked during a user gesture (iOS requirement)
-    const audioPlayer = new Audio();
+    // ── Voice WebSocket (sends transcripts to backend → laptop) ─────────────
+    let voiceWs = null;
+
+    function getVoiceWsUrl() {
+      const serverUrl = serverUrlInput.value.replace(/\/+$/, '') || window.location.origin;
+      return serverUrl.replace(/^http/, 'ws') + '/ws/voice';
+    }
+
+    function connectVoiceWs() {
+      if (voiceWs && voiceWs.readyState <= WebSocket.OPEN) return;
+      voiceWs = new WebSocket(getVoiceWsUrl());
+      voiceWs.onerror = () => {};
+      voiceWs.onclose = () => {
+        voiceWs = null;
+        if (voiceEnabled) setTimeout(connectVoiceWs, 1000);
+      };
+    }
+
+    function sendVoiceEvent(obj) {
+      if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+        voiceWs.send(JSON.stringify(obj));
+      }
+    }
 
     function setVoicePhase(phase, label, transcript) {
-      voicePhase             = phase;
-      voiceDot.className     = 'voice-dot ' + phase;
-      voiceLabel.textContent = label;
+      voicePhase               = phase;
+      voiceDot.className       = 'voice-dot ' + phase;
+      voiceLabel.textContent   = label;
       transcriptEl.textContent = transcript || '';
     }
 
@@ -426,8 +447,12 @@
         clearTimeout(silenceTimer);
         try { queryRecognizer.abort(); } catch {}
         const question = (finalText + ' ' + interim).trim();
-        if (question) sendVoiceQuery(question);
-        else if (voiceEnabled) startWakeWord();
+        if (question) {
+          // Send final question via WebSocket — laptop handles response + audio
+          sendVoiceEvent({ type: 'question', text: question });
+          setVoicePhase('listening', 'Say "Hey Claudio"...', '');
+        }
+        if (voiceEnabled) startWakeWord();
       }
 
       queryRecognizer.onresult = (event) => {
@@ -438,8 +463,11 @@
           if (event.results[i].isFinal) finalText += event.results[i][0].transcript;
           else                           interim   += event.results[i][0].transcript;
         }
-        transcriptEl.textContent = (finalText + interim).trim();
-        // Commit after 1.5 s of no new speech
+        const combined = (finalText + interim).trim();
+        transcriptEl.textContent = combined;
+        // Stream live transcript to the laptop in real time
+        if (combined) sendVoiceEvent({ type: 'interim', text: combined });
+        // Commit after 1.5 s of silence
         silenceTimer = setTimeout(dispatch, SILENCE_MS);
       };
 
@@ -450,95 +478,6 @@
       queryRecognizer.start();
     }
 
-    // ── Send query and speak response ────────────────────────────────────────
-
-    async function sendVoiceQuery(question) {
-      setVoicePhase('thinking', 'Thinking...', question);
-      const serverUrl = serverUrlInput.value.replace(/\/+$/, '') || window.location.origin;
-      try {
-        const res  = await fetch(`${serverUrl}/api/ask`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question }),
-        });
-        const data = res.ok ? await res.json() : null;
-        speakAnswer(data ? data.answer : "Sorry, I couldn't reach my memory right now.");
-      } catch {
-        speakAnswer("Sorry, I couldn't reach my memory right now.");
-      }
-    }
-
-    async function speakAnswer(text) {
-      setVoicePhase('speaking', 'Speaking...', text);
-      const serverUrl = serverUrlInput.value.replace(/\/+$/, '') || window.location.origin;
-
-      function done() {
-        if (voiceEnabled) setTimeout(startWakeWord, 700);
-      }
-
-      // Use streaming MediaSource where supported (Chrome/Android) to cut start-of-speech latency.
-      // iOS Safari does not support MediaSource for audio, so fall back to the full-blob approach there.
-      const canStream = typeof MediaSource !== 'undefined'
-        && typeof MediaSource.isTypeSupported === 'function'
-        && MediaSource.isTypeSupported('audio/mpeg');
-
-      try {
-        const res = await fetch(`${serverUrl}/api/tts`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text }),
-        });
-        if (!res.ok) throw new Error('TTS failed');
-
-        if (canStream && res.body) {
-          // ── Streaming path (Chrome / Android) ──────────────────────────────
-          const mediaSource = new MediaSource();
-          const objectUrl = URL.createObjectURL(mediaSource);
-          audioPlayer.onended = () => { URL.revokeObjectURL(objectUrl); done(); };
-          audioPlayer.onerror = () => { URL.revokeObjectURL(objectUrl); done(); };
-          audioPlayer.src = objectUrl;
-
-          await new Promise(r => mediaSource.addEventListener('sourceopen', r, { once: true }));
-          const sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
-
-          const reader = res.body.getReader();
-          let playing = false;
-          while (true) {
-            const { done: eof, value } = await reader.read();
-            if (eof) {
-              if (sourceBuffer.updating) {
-                await new Promise(r => sourceBuffer.addEventListener('updateend', r, { once: true }));
-              }
-              mediaSource.endOfStream();
-              break;
-            }
-            if (sourceBuffer.updating) {
-              await new Promise(r => sourceBuffer.addEventListener('updateend', r, { once: true }));
-            }
-            sourceBuffer.appendBuffer(value);
-            // Start playback as soon as the first chunk is buffered
-            if (!playing) {
-              playing = true;
-              audioPlayer.play().catch(done);
-            }
-          }
-        } else {
-          // ── Blob fallback (iOS Safari) ──────────────────────────────────────
-          // Reuse the pre-unlocked audioPlayer element (iOS requires play() from a user gesture;
-          // the element was unlocked when the user tapped "Mic On")
-          const blob = await res.blob();
-          const url = URL.createObjectURL(blob);
-          audioPlayer.onended = () => { URL.revokeObjectURL(url); done(); };
-          audioPlayer.onerror = () => { URL.revokeObjectURL(url); done(); };
-          audioPlayer.src = url;
-          audioPlayer.load();
-          audioPlayer.play().catch(done);
-        }
-      } catch {
-        done();
-      }
-    }
-
     // ── Toggle voice on/off ──────────────────────────────────────────────────
 
     function enableVoice() {
@@ -546,9 +485,7 @@
       voiceEnabled = true;
       voiceBtn.textContent = 'Mic On';
       voiceBtn.classList.add('active');
-      // Unlock audioPlayer on iOS — must happen synchronously inside a user gesture handler
-      audioPlayer.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
-      audioPlayer.play().catch(() => {});
+      connectVoiceWs();
       startWakeWord();
     }
 
@@ -557,7 +494,7 @@
       clearTimeout(silenceTimer);
       if (wakeRecognizer)  { try { wakeRecognizer.abort();  } catch {} wakeRecognizer  = null; }
       if (queryRecognizer) { try { queryRecognizer.abort(); } catch {} queryRecognizer = null; }
-      audioPlayer.pause();
+      if (voiceWs) { voiceWs.onclose = null; voiceWs.close(); voiceWs = null; }
       voiceBtn.textContent = 'Mic Off';
       voiceBtn.classList.remove('active');
       setVoicePhase('off', 'Voice off', '');
